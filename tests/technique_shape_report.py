@@ -9,6 +9,8 @@ from datetime import date
 from pathlib import Path
 import sys
 
+import torch
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -30,6 +32,12 @@ GROUP_ALIASES = {
     "masking": "masking",
 }
 
+DTYPES = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
+
 
 def select_shapes(max_shapes: int | None = None, groups: list[str] | None = None):
     """Select a deterministic subset while preserving the full shape definitions."""
@@ -46,27 +54,38 @@ def select_shapes(max_shapes: int | None = None, groups: list[str] | None = None
     return shapes
 
 
-def write_outputs(output_dir: Path, results, accuracy_trials: int, warmup: int, repeats: int, rounds: int) -> None:
-    csv_path = output_dir / "technique_shape_results.csv"
-    image_path = output_dir / "technique_shape.png"
-    report_path = output_dir / "TECHNIQUE_SHAPE_REPORT.md"
-    fields = ["shape_group", "shape", "setup", "technique", "accuracy", "failed", "checked", "baseline_ms", "optimized_ms", "speedup"]
+def write_outputs(
+    output_dir: Path,
+    results,
+    accuracy_trials: int,
+    warmup: int,
+    repeats: int,
+    rounds: int,
+    dtype: str | None = None,
+) -> None:
+    dtype_name = dtype or (results[0].dtype if results else "float32")
+    suffix = "" if dtype_name == "float32" else f"_{dtype_name}"
+    csv_path = output_dir / f"technique_shape_results{suffix}.csv"
+    image_path = output_dir / f"technique_shape{suffix}.png"
+    report_path = output_dir / f"TECHNIQUE_SHAPE_REPORT{suffix.upper()}.md"
+    fields = ["dtype", "shape_group", "shape", "setup", "technique", "accuracy", "failed", "checked", "baseline_ms", "optimized_ms", "speedup"]
     with csv_path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for result in results:
             writer.writerow({
+                "dtype": result.dtype,
                 "shape_group": result.shape.group, "shape": result.shape.label, "setup": result.shape.setup,
                 "technique": result.technique, "accuracy": result.accuracy, "failed": result.failed,
                 "checked": result.checked, "baseline_ms": f"{result.baseline_ms:.4f}",
                 "optimized_ms": f"{result.optimized_ms:.4f}", "speedup": f"{result.speedup:.3f}",
             })
-    write_technique_shape_plot(image_path, results)
+    write_technique_shape_plot(image_path, results, dtype_name)
     lines = [
-        f"# Technique × Model-Shape Experiment ({len(results)} Configurations)", "",
+        f"# Technique × Model-Shape Experiment ({len(results)} Configurations, {dtype_name})", "",
         f"Generated: {date.today().isoformat()} by `technique_shape_report.py`.", "",
-        f"This is a full factorial experiment with {len({(result.shape.group, result.shape.label) for result in results})} model shapes and {len(TECHNIQUES)} technique combinations ({len(results)} rows). Bits in each combination are ordered QKV / SDPA / Triton LN / In-place / Shape-specialized LN. `00000` is a second true BaselineTransformer control. The modular ablation model toggles only the named technique while keeping the lab.py equations, weights, inputs, and eager FP32 baseline fixed; it does not modify the supplied benchmark outside UserOptimizedTransformer. Compilation startup is not involved. Each technique is timed beside its baseline with alternating order to cancel GPU clock/thermal drift. Identical configurations repeated by different ablation groups reuse one timing measurement (for example B8/S128 = D512/H8 = L6 = F2048), so labels cannot disagree because of run order. Timing uses {accuracy_trials} accuracy trial(s), {warmup} warm-up calls, {repeats} CUDA-event repeats, and {rounds} benchmark round(s).", "",
-        "![Technique versus shape speedup](technique_shape.png)", "",
+        f"This is a full factorial experiment with {len({(result.shape.group, result.shape.label) for result in results})} model shapes and {len(TECHNIQUES)} technique combinations ({len(results)} rows) at {dtype_name}. Bits in each combination are ordered QKV / SDPA / Triton LN / In-place / Shape-specialized LN. `00000` is a second true BaselineTransformer control. The modular ablation model toggles only the named technique while keeping the lab.py equations, weights, inputs, and {dtype_name} baseline fixed; it does not modify the supplied benchmark outside UserOptimizedTransformer. Compilation startup is not involved. Each technique is timed beside its baseline with alternating order to cancel GPU clock/thermal drift. Identical configurations repeated by different ablation groups reuse one timing measurement (for example B8/S128 = D512/H8 = L6 = F2048), so labels cannot disagree because of run order. Timing uses {accuracy_trials} accuracy trial(s), {warmup} warm-up calls, {repeats} CUDA-event repeats, and {rounds} benchmark round(s).", "",
+        f"![Technique versus shape speedup]({image_path.name})", "",
         "Speedup is `baseline median latency / optimized median latency`. Accuracy uses lab.py's unchanged criterion: absolute error ≤ 0.001 OR relative error ≤ 1%.", "",
         "The sweep and the standalone `lab.py` result answer different questions: this table keeps every ablation eager so individual techniques can be compared, while the main result may enable `--compile-user`. GPU clocks and power state can change the absolute milliseconds; compare the baseline/optimized ratio within a row, not an absolute millisecond value from a different run.", "",
         "## Duplicate-shape control", "",
@@ -127,7 +146,7 @@ def write_outputs(output_dir: Path, results, accuracy_trials: int, warmup: int, 
     lines += ["", f"## All {len(results)} measurements", "", "| Group | Shape | Setup | Technique | Accuracy | Baseline ms | Optimized ms | Speedup |", "| --- | --- | --- | --- | --- | ---: | ---: | ---: |"]
     for result in results:
         lines.append(f"| {result.shape.group} | {result.shape.label} | {result.shape.setup} | {result.technique} | {result.accuracy} ({result.failed}/{result.checked}) | {result.baseline_ms:.4f} | {result.optimized_ms:.4f} | **{result.speedup:.3f}×** |")
-    lines += ["", "Raw data: `technique_shape_results.csv`."]
+    lines += ["", f"Raw data: `{csv_path.name}`."]
     report_path.write_text("\n".join(lines) + "\n")
     print(f"wrote {csv_path}")
     print(f"wrote {image_path}")
@@ -147,6 +166,10 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=30)
     parser.add_argument("--benchmark-rounds", type=int, default=3)
     parser.add_argument(
+        "--dtype", choices=tuple(DTYPES), default="float32",
+        help="model and input dtype for the sweep (default: float32)",
+    )
+    parser.add_argument(
         "--max-shapes", type=int, default=None,
         help="keep only the first N shapes after filtering (default: all 39)",
     )
@@ -156,11 +179,17 @@ def main() -> int:
     )
     args = parser.parse_args()
     shapes = select_shapes(args.max_shapes, args.groups)
-    results = run_technique_shape_sweep(shapes, args.accuracy_trials, args.warmup, args.repeats, args.benchmark_rounds)
+    results = run_technique_shape_sweep(
+        shapes, args.accuracy_trials, args.warmup, args.repeats,
+        args.benchmark_rounds, dtype=DTYPES[args.dtype],
+    )
     expected = len(shapes) * len(TECHNIQUES)
     if len(results) != expected:
         raise RuntimeError(f"expected {expected} rows, got {len(results)}")
-    write_outputs(args.output_dir, results, args.accuracy_trials, args.warmup, args.repeats, args.benchmark_rounds)
+    write_outputs(
+        args.output_dir, results, args.accuracy_trials, args.warmup,
+        args.repeats, args.benchmark_rounds, args.dtype,
+    )
     return 0
 
 

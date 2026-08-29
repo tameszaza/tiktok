@@ -56,8 +56,7 @@ class ConfigurableOptimizedTransformer(BaselineTransformer):
     def _attention(self, layer: BaselineTransformerBlock, index: int, x: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
         batch, seq_len, d_model = x.shape
         heads, head_dim = layer.attention.num_heads, layer.attention.head_dim
-        strict = x.dtype in (torch.float16, torch.bfloat16) or (self.config.causal and mask is not None)
-        if self.options.fused_qkv and not strict:
+        if self.options.fused_qkv:
             qkv = F.linear(x, self._packed_qkv_weight[index], self._packed_qkv_bias[index]).view(batch, seq_len, 3, heads, head_dim)
             q, k, v = qkv.unbind(dim=2)
             q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
@@ -65,9 +64,18 @@ class ConfigurableOptimizedTransformer(BaselineTransformer):
             q = layer.attention._split_heads(layer.attention.q_proj(x))
             k = layer.attention._split_heads(layer.attention.k_proj(x))
             v = layer.attention._split_heads(layer.attention.v_proj(x))
-        if self.options.fused_sdpa and not strict:
-            sdpa_mask = None if mask is None else mask[:, None, None, :]
-            context = F.scaled_dot_product_attention(q, k, v, attn_mask=sdpa_mask, dropout_p=0.0, is_causal=self.config.causal if sdpa_mask is None else False)
+        if self.options.fused_sdpa:
+            if mask is None:
+                sdpa_mask = None
+                is_causal = self.config.causal
+            elif self.config.causal:
+                causal_mask = torch.ones((seq_len, seq_len), device=x.device, dtype=torch.bool).tril()
+                sdpa_mask = mask[:, None, None, :] & causal_mask
+                is_causal = False
+            else:
+                sdpa_mask = mask[:, None, None, :]
+                is_causal = False
+            context = F.scaled_dot_product_attention(q, k, v, attn_mask=sdpa_mask, dropout_p=0.0, is_causal=is_causal)
         else:
             scores = torch.matmul(q, k.transpose(-2, -1)) * (head_dim ** -0.5)
             if self.config.causal:
@@ -106,7 +114,7 @@ class ConfigurableOptimizedTransformer(BaselineTransformer):
         return values, normalized
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if x.device.type != "cuda" or torch.is_grad_enabled() or x.dtype != torch.float32:
+        if x.device.type != "cuda" or torch.is_grad_enabled():
             return super().forward(x, mask)
         normalized = self.layers[0].norm1(x)
         for index, layer in enumerate(self.layers):

@@ -45,6 +45,7 @@ class ShapeCase:
 @dataclass(frozen=True)
 class TechniqueResult:
     shape: ShapeCase
+    dtype: str
     technique: str
     accuracy: str
     failed: int
@@ -104,12 +105,20 @@ def build_shape_cases() -> tuple[ShapeCase, ...]:
     return tuple(cases)
 
 
-def _accuracy(baseline, optimized, shape: ShapeCase, trials: int, device: torch.device, seed: int) -> tuple[str, int, int]:
+def _accuracy(
+    baseline,
+    optimized,
+    shape: ShapeCase,
+    dtype: torch.dtype,
+    trials: int,
+    device: torch.device,
+    seed: int,
+) -> tuple[str, int, int]:
     failed = 0
     checked = 0
     passed = True
     for trial in range(trials):
-        x, mask = generate_random_case(shape.config, device, torch.float32, seed + trial, shape.padding_ratio, 1.0)
+        x, mask = generate_random_case(shape.config, device, dtype, seed + trial, shape.padding_ratio, 1.0)
         with torch.inference_mode():
             comparison = compare_outputs(baseline(x, mask), optimized(x, mask), rtol=0.01, atol=0.001)
         passed &= comparison.passed
@@ -125,9 +134,18 @@ def run_technique_shape_sweep(
     repeats: int = 40,
     rounds: int = 2,
     seed: int = 1234,
+    dtype: torch.dtype = torch.float32,
 ) -> list[TechniqueResult]:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable; restore the NVIDIA driver before running the sweep")
+    dtype_names = {
+        torch.float32: "float32",
+        torch.float16: "float16",
+        torch.bfloat16: "bfloat16",
+    }
+    if dtype not in dtype_names:
+        raise ValueError(f"unsupported sweep dtype: {dtype}")
+    dtype_name = dtype_names[dtype]
     device = torch.device("cuda")
     results: list[TechniqueResult] = []
     # The factorial axes intentionally repeat the default configuration (the
@@ -145,7 +163,7 @@ def run_technique_shape_sweep(
         if config_key in measured_by_config:
             for measured in measured_by_config[config_key]:
                 result = TechniqueResult(
-                    shape, measured.technique, measured.accuracy, measured.failed,
+                    shape, dtype_name, measured.technique, measured.accuracy, measured.failed,
                     measured.checked, measured.baseline_ms, measured.optimized_ms,
                     measured.speedup,
                 )
@@ -157,8 +175,8 @@ def run_technique_shape_sweep(
                 )
                 results.append(result)
             continue
-        x, mask = generate_random_case(shape.config, device, torch.float32, seed + 100000 + shape_index, shape.padding_ratio, 1.0)
-        baseline = BaselineTransformer(shape.config).to(device=device).eval()
+        x, mask = generate_random_case(shape.config, device, dtype, seed + 100000 + shape_index, shape.padding_ratio, 1.0)
+        baseline = BaselineTransformer(shape.config).to(device=device, dtype=dtype).eval()
         # Build one variant at a time so a large 32-combination sweep does not
         # keep dozens of full models resident on the GPU.  The baseline is
         # deliberately timed beside each variant below.  Measuring it once at
@@ -170,12 +188,15 @@ def run_technique_shape_sweep(
         shape_results: list[TechniqueResult] = []
         for technique_index, (name, options) in enumerate(TECHNIQUES):
             if options is None:
-                variant = BaselineTransformer(shape.config).to(device=device).eval()
+                variant = BaselineTransformer(shape.config).to(device=device, dtype=dtype).eval()
             else:
-                variant = ConfigurableOptimizedTransformer(shape.config, options).to(device=device).eval()
+                variant = ConfigurableOptimizedTransformer(shape.config, options).to(device=device, dtype=dtype).eval()
             copy_model_weights(baseline, variant)
             warmup_model(variant, x, mask, warmup, device)
-            accuracy, failed, checked = _accuracy(baseline, variant, shape, accuracy_trials, device, seed + shape_index * 31 + technique_index)
+            accuracy, failed, checked = _accuracy(
+                baseline, variant, shape, dtype, accuracy_trials, device,
+                seed + shape_index * 31 + technique_index,
+            )
             # Pair baseline and variant measurements, alternating order on
             # every round.  This cancels slow clock changes and makes the
             # speedup denominator local to the technique being tested.
@@ -190,7 +211,10 @@ def run_technique_shape_sweep(
                     baseline_samples += benchmark_once(baseline, x, mask, repeats, device)
             baseline_ms = statistics.median(baseline_samples)
             optimized_ms = statistics.median(optimized_samples)
-            result = TechniqueResult(shape, name, accuracy, failed, checked, baseline_ms, optimized_ms, baseline_ms / optimized_ms)
+            result = TechniqueResult(
+                shape, dtype_name, name, accuracy, failed, checked,
+                baseline_ms, optimized_ms, baseline_ms / optimized_ms,
+            )
             print(f"[{shape.group}] {shape.label} / {name}: {accuracy} failed={failed}/{checked} baseline={baseline_ms:.4f} ms optimized={optimized_ms:.4f} ms speedup={result.speedup:.3f}x", flush=True)
             results.append(result)
             shape_results.append(result)

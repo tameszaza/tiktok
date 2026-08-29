@@ -13,7 +13,11 @@ import numpy as np
 from .technique_shape import TECHNIQUES, TechniqueResult
 
 
-def write_technique_shape_plot(path: Path, results: list[TechniqueResult]) -> None:
+def write_technique_shape_plot(
+    path: Path,
+    results: list[TechniqueResult],
+    dtype: str | None = None,
+) -> None:
     shapes = []
     for result in results:
         if result.shape.label not in shapes:
@@ -48,6 +52,7 @@ def write_technique_shape_plot(path: Path, results: list[TechniqueResult]) -> No
     bar_ax.tick_params(axis="x", rotation=90)
     for bar, value in zip(bars, means):
         bar_ax.text(bar.get_x() + bar.get_width() / 2, value, f"{value:.2f}×", ha="center", va="bottom", fontsize=9)
-    fig.suptitle(f"Technique × shape experiment ({len(results)} measurements)", fontsize=15)
+    dtype_label = dtype or (results[0].dtype if results else "float32")
+    fig.suptitle(f"Technique × shape experiment ({len(results)} measurements, {dtype_label})", fontsize=15)
     fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)

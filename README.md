@@ -70,7 +70,16 @@ unchanged:
 
 # All batch/sequence and masking shapes only
 .venv/bin/python tiktok/tests/technique_shape_report.py --groups batch masking
+
+# Lower-precision reports (artifacts receive a dtype suffix)
+.venv/bin/python tiktok/tests/technique_shape_report.py --dtype float16
+.venv/bin/python tiktok/tests/technique_shape_report.py --dtype bfloat16
 ```
+
+The shape report accepts `float32`, `float16`, and `bfloat16`. Each invocation
+measures one dtype; FP32 keeps the historical artifact names, while lower
+precision writes `technique_shape_results_<dtype>.csv`,
+`technique_shape_<dtype>.png`, and `TECHNIQUE_SHAPE_REPORT_<DTYPE>.md`.
 
 For operation-level timing and an automatically generated bottleneck report:
 
@@ -94,10 +103,13 @@ Test causal attention and padding:
 
 ## Correctness behavior
 
-The FP32 CUDA inference path uses the custom Triton fusion. FP16/BF16, CPU, and
-gradient-enabled execution use a strict reference-order submission path because
-small fused-normalization rounding differences can accumulate beyond the
-benchmark's per-element tolerance. No approximation or quantization is used.
+The standalone `lab.py` FP32 CUDA inference path uses the custom Triton fusion.
+Its FP16/BF16, CPU, and gradient-enabled execution still use the strict
+reference-order submission path. The matrix shape report is a separate ablation
+runner: its CUDA FP16/BF16 variants exercise the selected QKV, SDPA, Triton
+LayerNorm, in-place, and shape-specialized options, and record any accuracy
+failures under the same per-element tolerance. No approximation or quantization
+is used.
 
 ## Limitations and future work
 
