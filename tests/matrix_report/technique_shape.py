@@ -45,7 +45,6 @@ class ShapeCase:
 @dataclass(frozen=True)
 class TechniqueResult:
     shape: ShapeCase
-    dtype: str
     technique: str
     accuracy: str
     failed: int
@@ -53,6 +52,7 @@ class TechniqueResult:
     baseline_ms: float
     optimized_ms: float
     speedup: float
+    dtype: str = "float32"
 
 
 TECHNIQUE_NAMES = ("QKV", "SDPA", "Triton LN", "In-place", "Shape-specialized LN")
@@ -163,9 +163,9 @@ def run_technique_shape_sweep(
         if config_key in measured_by_config:
             for measured in measured_by_config[config_key]:
                 result = TechniqueResult(
-                    shape, dtype_name, measured.technique, measured.accuracy, measured.failed,
+                    shape, measured.technique, measured.accuracy, measured.failed,
                     measured.checked, measured.baseline_ms, measured.optimized_ms,
-                    measured.speedup,
+                    measured.speedup, dtype_name,
                 )
                 print(
                     f"[{shape.group}] {shape.label} / {result.technique}: "
@@ -212,8 +212,8 @@ def run_technique_shape_sweep(
             baseline_ms = statistics.median(baseline_samples)
             optimized_ms = statistics.median(optimized_samples)
             result = TechniqueResult(
-                shape, dtype_name, name, accuracy, failed, checked,
-                baseline_ms, optimized_ms, baseline_ms / optimized_ms,
+                shape, name, accuracy, failed, checked, baseline_ms,
+                optimized_ms, baseline_ms / optimized_ms, dtype_name,
             )
             print(f"[{shape.group}] {shape.label} / {name}: {accuracy} failed={failed}/{checked} baseline={baseline_ms:.4f} ms optimized={optimized_ms:.4f} ms speedup={result.speedup:.3f}x", flush=True)
             results.append(result)

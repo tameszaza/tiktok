@@ -10,6 +10,11 @@ from tests.technique_shape_report import write_outputs
 
 
 class TechniqueShapeReportOutputTests(unittest.TestCase):
+    def test_technique_result_keeps_legacy_positional_shape(self) -> None:
+        shape = build_shape_cases()[0]
+        result = TechniqueResult(shape, "00000", "PASS", 0, 1, 2.0, 1.0, 2.0)
+        self.assertEqual(result.dtype, "float32")
+
     def test_lower_precision_outputs_are_self_describing_and_suffixed(self) -> None:
         shape = build_shape_cases()[0]
         results = [
