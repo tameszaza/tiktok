@@ -161,6 +161,7 @@ from steady-state timing and should be amortized in deployment.
 
 The technique-by-shape factorial experiment is in
 `TECHNIQUE_SHAPE_REPORT.md`. It measures all 32 combinations of QKV, SDPA,
-Triton LN, in-place reuse, and shape-specialized LayerNorm across 39 shapes for
-1,248 rows; `technique_shape_results.csv` and `technique_shape.png` contain the
-raw data and heat map.
+Triton LN, in-place reuse, and shape-specialized LayerNorm across the 14
+appendix shapes for 448 rows. Shapes that exceed the local GPU's explicit
+attention workspace are retained as `SKIP` rows; `technique_shape_results.csv`
+and `technique_shape.png` contain the raw data and heat map.

@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_DIR = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -137,7 +138,7 @@ def write_outputs(output_dir: Path, results: list[OperationResult]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT)
+    parser.add_argument("--output-dir", type=Path, default=PROJECT_DIR)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=40)
     args = parser.parse_args()

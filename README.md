@@ -53,23 +53,20 @@ The latest default test passed every checked output element and measured a
 1.218x median-latency speedup on the test machine. Results vary with GPU power
 state, temperature, driver, and PyTorch version.
 
-For the full technique-combination versus shape experiment (39 shapes × 32
-technique combinations = 1,248 rows), run:
+For the appendix technique-combination versus shape experiment (14 shapes ×
+32 technique combinations = 448 rows), run:
 
 ```bash
 .venv/bin/python tiktok/tests/technique_shape_report.py
 ```
 
-For a faster representative sweep, select shape families and/or cap the
-number of labels. The filters affect only the report runner; `lab.py` is
-unchanged:
+For a faster subset, cap the number of appendix labels. This filter affects
+only the report runner; `lab.py` is unchanged:
 
 ```bash
-# 10 deterministic shapes (320 technique rows)
+# 10 deterministic appendix shapes (320 technique rows)
 .venv/bin/python tiktok/tests/technique_shape_report.py --max-shapes 10
 
-# All batch/sequence and masking shapes only
-.venv/bin/python tiktok/tests/technique_shape_report.py --groups batch masking
 ```
 
 For operation-level timing and an automatically generated bottleneck report:

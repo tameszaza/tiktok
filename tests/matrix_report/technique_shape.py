@@ -86,22 +86,30 @@ def _shape(group: str, label: str, batch: int = 8, seq: int = 128, d_model: int 
 
 
 def build_shape_cases() -> tuple[ShapeCase, ...]:
-    """Return shapes covering batch/sequence, width, depth, FFN, and masks."""
-    cases: list[ShapeCase] = []
-    for batch, seq in ((1, 32), (1, 64), (1, 128), (1, 256), (2, 32), (2, 64), (2, 128), (2, 256), (4, 32), (4, 64), (4, 128), (4, 256), (8, 32), (8, 128), (1, 512), (2, 512)):
-        cases.append(_shape("batch×sequence", f"B{batch} S{seq}", batch=batch, seq=seq))
-    for d_model, heads in ((128, 4), (256, 4), (384, 8), (512, 8), (768, 12), (1024, 16)):
-        cases.append(_shape("hidden×head", f"D{d_model} H{heads}", d_model=d_model, heads=heads, ffn=4 * d_model))
-    cases.append(_shape("hidden×head", "D1536 H24", batch=2, seq=64, d_model=1536, heads=24, ffn=6144, layers=2))
-    cases.append(_shape("hidden×head", "D2048 H32", batch=1, seq=32, d_model=2048, heads=32, ffn=8192, layers=1))
-    for layers in (1, 2, 4, 6, 8, 12):
-        cases.append(_shape("layer count", f"L{layers}", layers=layers))
-    for ffn in (256, 512, 1024, 2048, 4096, 8192):
-        cases.append(_shape("FFN width", f"F{ffn}", ffn=ffn))
-    cases.append(_shape("masking", "causal B2 S128", batch=2, seq=128, layers=2, causal=True))
-    cases.append(_shape("masking", "padding B4 S64", batch=4, seq=64, layers=2, padding_ratio=0.25))
-    cases.append(_shape("masking", "causal+padding B4 S64", batch=4, seq=64, layers=2, causal=True, padding_ratio=0.25))
-    return tuple(cases)
+    """Return the 14 configurations listed in the workshop appendix (Fig. 3.7).
+
+    These are deliberately kept as explicit records instead of generating a
+    Cartesian product: the appendix varies one parameter at a time and also
+    contains two stress cases (B=10000 and S=100000) that may exceed a local
+    GPU's memory capacity.
+    """
+    group = "appendix test shape"
+    return (
+        _shape(group, "#1 B64 D128 H4 S128 L4", batch=64, seq=128, d_model=128, heads=4, ffn=128, layers=4, causal=True),
+        _shape(group, "#2 B1 D128 H4 S128 L4", batch=1, seq=128, d_model=128, heads=4, ffn=128, layers=4, causal=True),
+        _shape(group, "#3 B4 D128 H4 S128 L4", batch=4, seq=128, d_model=128, heads=4, ffn=128, layers=4, causal=True),
+        _shape(group, "#4 B16 D128 H4 S128 L4", batch=16, seq=128, d_model=128, heads=4, ffn=128, layers=4, causal=True),
+        _shape(group, "#5 B128 D128 H4 S128 L4", batch=128, seq=128, d_model=128, heads=4, ffn=128, layers=4, causal=True),
+        _shape(group, "#6 B10000 D128 H4 S128 L4", batch=10000, seq=128, d_model=128, heads=4, ffn=128, layers=4, causal=True),
+        _shape(group, "#7 B64 D32 H4 S128 L4", batch=64, seq=128, d_model=32, heads=4, ffn=32, layers=4, causal=True),
+        _shape(group, "#8 B64 D1024 H4 S128 L4", batch=64, seq=128, d_model=1024, heads=4, ffn=1024, layers=4, causal=True),
+        _shape(group, "#9 B64 D128 H1 S128 L4", batch=64, seq=128, d_model=128, heads=1, ffn=128, layers=4, causal=True),
+        _shape(group, "#10 B64 D128 H2 S128 L4", batch=64, seq=128, d_model=128, heads=2, ffn=128, layers=4, causal=True),
+        _shape(group, "#11 B64 D128 H16 S128 L4", batch=64, seq=128, d_model=128, heads=16, ffn=128, layers=4, causal=True),
+        _shape(group, "#12 B64 D128 H4 S32 L4", batch=64, seq=32, d_model=128, heads=4, ffn=128, layers=4, causal=True),
+        _shape(group, "#13 B64 D128 H4 S1024 L4", batch=64, seq=1024, d_model=128, heads=4, ffn=128, layers=4, causal=True),
+        _shape(group, "#14 B32 D1024 H16 S100000 L2", batch=32, seq=100000, d_model=1024, heads=16, ffn=1024, layers=2, causal=True),
+    )
 
 
 def _accuracy(baseline, optimized, shape: ShapeCase, trials: int, device: torch.device, seed: int) -> tuple[str, int, int]:
@@ -118,6 +126,28 @@ def _accuracy(baseline, optimized, shape: ShapeCase, trials: int, device: torch.
     return ("PASS" if passed else "FAIL", failed, checked)
 
 
+def _memory_skip_reason(shape: ShapeCase, device: torch.device) -> str | None:
+    """Return a reason before allocating a shape that cannot fit this GPU."""
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    activation_bytes = (
+        shape.config.batch_size * shape.config.seq_len * shape.config.d_model * 4
+    )
+    score_bytes = (
+        shape.config.batch_size * shape.config.num_heads
+        * shape.config.seq_len * shape.config.seq_len * 4
+    )
+    # The causal appendix cases use lab.py's explicit reference path, which
+    # holds a score and probability matrix at peak (both FP32). Include a
+    # conservative activation allowance and require the estimate to stay below
+    # 70% of *currently* free memory, leaving room for the model and allocator.
+    estimated_peak = 2 * score_bytes + 4 * activation_bytes
+    if estimated_peak > 0.70 * free_bytes:
+        estimate_gib = estimated_peak / (1024 ** 3)
+        free_gib = free_bytes / (1024 ** 3)
+        return f"SKIP (estimated explicit-attention workspace {estimate_gib:.2f} GiB exceeds 70% of {free_gib:.2f} GiB free GPU memory)"
+    return None
+
+
 def run_technique_shape_sweep(
     shapes: tuple[ShapeCase, ...],
     accuracy_trials: int = 2,
@@ -130,10 +160,9 @@ def run_technique_shape_sweep(
         raise RuntimeError("CUDA is unavailable; restore the NVIDIA driver before running the sweep")
     device = torch.device("cuda")
     results: list[TechniqueResult] = []
-    # The factorial axes intentionally repeat the default configuration (the
-    # B8/S128, D512/H8, L6, and F2048 rows).  A duplicate shape is the same
-    # workload, not a new experiment; reuse one measured result so those four
-    # labels cannot disagree merely because the GPU clock changed later.
+    # The appendix list is explicit and contains no generated Cartesian-product
+    # aliases. Keep the cache for safety if a future appendix revision adds a
+    # duplicate configuration.
     measured_by_config: dict[tuple[object, ...], list[TechniqueResult]] = {}
     for shape_index, shape in enumerate(shapes):
         shape.config.validate()
@@ -156,6 +185,16 @@ def run_technique_shape_sweep(
                     flush=True,
                 )
                 results.append(result)
+            continue
+        skip_reason = _memory_skip_reason(shape, device)
+        if skip_reason is not None:
+            print(f"[{shape.group}] {shape.label}: {skip_reason}", flush=True)
+            skipped = [
+                TechniqueResult(shape, name, skip_reason, 0, 0, float("nan"), float("nan"), float("nan"))
+                for name, _ in TECHNIQUES
+            ]
+            results.extend(skipped)
+            measured_by_config[config_key] = skipped
             continue
         x, mask = generate_random_case(shape.config, device, torch.float32, seed + 100000 + shape_index, shape.padding_ratio, 1.0)
         baseline = BaselineTransformer(shape.config).to(device=device).eval()
