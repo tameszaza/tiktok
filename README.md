@@ -60,6 +60,18 @@ technique combinations = 1,248 rows), run:
 .venv/bin/python tiktok/tests/technique_shape_report.py
 ```
 
+For a faster representative sweep, select shape families and/or cap the
+number of labels. The filters affect only the report runner; `lab.py` is
+unchanged:
+
+```bash
+# 10 deterministic shapes (320 technique rows)
+.venv/bin/python tiktok/tests/technique_shape_report.py --max-shapes 10
+
+# All batch/sequence and masking shapes only
+.venv/bin/python tiktok/tests/technique_shape_report.py --groups batch masking
+```
+
 For operation-level timing and an automatically generated bottleneck report:
 
 ```bash

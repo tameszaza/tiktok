@@ -22,6 +22,29 @@ from tiktok.tests.matrix_report.technique_shape_plot import (  # noqa: E402
     write_technique_shape_plot,
 )
 
+GROUP_ALIASES = {
+    "batch": "batch×sequence",
+    "hidden": "hidden×head",
+    "layers": "layer count",
+    "ffn": "FFN width",
+    "masking": "masking",
+}
+
+
+def select_shapes(max_shapes: int | None = None, groups: list[str] | None = None):
+    """Select a deterministic subset while preserving the full shape definitions."""
+    shapes = build_shape_cases()
+    if groups:
+        wanted = {GROUP_ALIASES[group] for group in groups}
+        shapes = tuple(shape for shape in shapes if shape.group in wanted)
+    if max_shapes is not None:
+        if max_shapes < 1:
+            raise ValueError("--max-shapes must be at least 1")
+        shapes = shapes[:max_shapes]
+    if not shapes:
+        raise ValueError("shape filters selected no model shapes")
+    return shapes
+
 
 def write_outputs(output_dir: Path, results, accuracy_trials: int, warmup: int, repeats: int, rounds: int) -> None:
     csv_path = output_dir / "technique_shape_results.csv"
@@ -42,7 +65,7 @@ def write_outputs(output_dir: Path, results, accuracy_trials: int, warmup: int, 
     lines = [
         f"# Technique × Model-Shape Experiment ({len(results)} Configurations)", "",
         f"Generated: {date.today().isoformat()} by `technique_shape_report.py`.", "",
-        f"This is a full factorial experiment with {len(build_shape_cases())} model shapes and {len(TECHNIQUES)} technique combinations ({len(build_shape_cases()) * len(TECHNIQUES)} rows). Bits in each combination are ordered QKV / SDPA / Triton LN / In-place / Shape-specialized LN. `00000` is a second true BaselineTransformer control. The modular ablation model toggles only the named technique while keeping the lab.py equations, weights, inputs, and eager FP32 baseline fixed; it does not modify the supplied benchmark outside UserOptimizedTransformer. Compilation startup is not involved. Each technique is timed beside its baseline with alternating order to cancel GPU clock/thermal drift. Identical configurations repeated by different ablation groups reuse one timing measurement (for example B8/S128 = D512/H8 = L6 = F2048), so labels cannot disagree because of run order. Timing uses {accuracy_trials} accuracy trial(s), {warmup} warm-up calls, {repeats} CUDA-event repeats, and {rounds} benchmark round(s).", "",
+        f"This is a full factorial experiment with {len({(result.shape.group, result.shape.label) for result in results})} model shapes and {len(TECHNIQUES)} technique combinations ({len(results)} rows). Bits in each combination are ordered QKV / SDPA / Triton LN / In-place / Shape-specialized LN. `00000` is a second true BaselineTransformer control. The modular ablation model toggles only the named technique while keeping the lab.py equations, weights, inputs, and eager FP32 baseline fixed; it does not modify the supplied benchmark outside UserOptimizedTransformer. Compilation startup is not involved. Each technique is timed beside its baseline with alternating order to cancel GPU clock/thermal drift. Identical configurations repeated by different ablation groups reuse one timing measurement (for example B8/S128 = D512/H8 = L6 = F2048), so labels cannot disagree because of run order. Timing uses {accuracy_trials} accuracy trial(s), {warmup} warm-up calls, {repeats} CUDA-event repeats, and {rounds} benchmark round(s).", "",
         "![Technique versus shape speedup](technique_shape.png)", "",
         "Speedup is `baseline median latency / optimized median latency`. Accuracy uses lab.py's unchanged criterion: absolute error ≤ 0.001 OR relative error ≤ 1%.", "",
         "The sweep and the standalone `lab.py` result answer different questions: this table keeps every ablation eager so individual techniques can be compared, while the main result may enable `--compile-user`. GPU clocks and power state can change the absolute milliseconds; compare the baseline/optimized ratio within a row, not an absolute millisecond value from a different run.", "",
@@ -123,9 +146,18 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=30)
     parser.add_argument("--benchmark-rounds", type=int, default=3)
+    parser.add_argument(
+        "--max-shapes", type=int, default=None,
+        help="keep only the first N shapes after filtering (default: all 39)",
+    )
+    parser.add_argument(
+        "--groups", nargs="+", choices=tuple(GROUP_ALIASES), default=None,
+        help="shape families to include: batch, hidden, layers, ffn, masking",
+    )
     args = parser.parse_args()
-    results = run_technique_shape_sweep(build_shape_cases(), args.accuracy_trials, args.warmup, args.repeats, args.benchmark_rounds)
-    expected = len(build_shape_cases()) * len(TECHNIQUES)
+    shapes = select_shapes(args.max_shapes, args.groups)
+    results = run_technique_shape_sweep(shapes, args.accuracy_trials, args.warmup, args.repeats, args.benchmark_rounds)
+    expected = len(shapes) * len(TECHNIQUES)
     if len(results) != expected:
         raise RuntimeError(f"expected {expected} rows, got {len(results)}")
     write_outputs(args.output_dir, results, args.accuracy_trials, args.warmup, args.repeats, args.benchmark_rounds)
