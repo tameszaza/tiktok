@@ -85,7 +85,7 @@ class ConfigurableOptimizedTransformer(BaselineTransformer):
     def _boundary(self, residual: torch.Tensor, update: torch.Tensor, norm: nn.LayerNorm, mask: Optional[torch.Tensor], zero_output: bool, inplace: bool) -> tuple[torch.Tensor, torch.Tensor]:
         use_fused_ln = self.options.fused_layer_norm and not (
             self.options.shape_specialized_ln and residual.numel() < 131072
-        )
+        ) and residual.numel() // residual.shape[-1] <= 65536
         if use_fused_ln:
             try:
                 from transformer_kernels import fused_residual_layer_norm, fused_residual_layer_norm_inplace

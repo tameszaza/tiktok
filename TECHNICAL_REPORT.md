@@ -154,14 +154,22 @@ PyTorch's optimized CUDA SDPA rather than duplicating the mature vendor kernel.
 The direct Triton FlashAttention candidate is available in
 `transformer_kernels.py` and benchmarked in `FLASH_ATTENTION_REPORT.md`; it is
 retained for reproducibility and future autotuning, not enabled blindly.
-The 131,072-element boundary is an evidence-based shape specialization: below
-it, native residual+LayerNorm avoids a one-program Triton launch overhead; above
-it, the fused kernel wins in the sweep. Compiler compilation time is excluded
-from steady-state timing and should be amortized in deployment.
+The LayerNorm dispatch is shape-specialized at both ends. Below 131,072
+activation elements, native residual+LayerNorm avoids the custom launch
+overhead. The custom one-program-per-row kernel remains enabled through 65,536
+rows, the largest verified appendix grid. At 1,280,000 rows, repeated launches
+caused a driver failure, so the B=10,000 stress case uses native LayerNorm while
+retaining memory-efficient SDPA. Compiler compilation time is excluded from
+steady-state timing and should be amortized in deployment.
 
 The technique-by-shape factorial experiment is in
 `TECHNIQUE_SHAPE_REPORT.md`. It measures all 32 combinations of QKV, SDPA,
 Triton LN, in-place reuse, and shape-specialized LayerNorm across the 14
-appendix shapes for 448 rows. Shapes that exceed the local GPU's explicit
-attention workspace are retained as `SKIP` rows; `technique_shape_results.csv`
-and `technique_shape.png` contain the raw data and heat map.
+appendix shapes for 448 rows. An explicit-attention baseline is allowed to OOM;
+the runner then independently attempts each memory-efficient SDPA combination
+at full size and reports its latency without inventing a speedup denominator.
+Correctness for such a row is checked against the unchanged baseline at
+batch=1, which is valid because examples do not interact across the batch.
+Only a shape whose input tensor itself cannot fit is rejected before execution.
+`technique_shape_results.csv` and `technique_shape.png` contain the raw data and
+heat map.

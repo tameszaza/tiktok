@@ -112,12 +112,31 @@ def build_shape_cases() -> tuple[ShapeCase, ...]:
     )
 
 
-def _accuracy(baseline, optimized, shape: ShapeCase, trials: int, device: torch.device, seed: int) -> tuple[str, int, int]:
+def _accuracy(
+    baseline,
+    optimized,
+    shape: ShapeCase,
+    trials: int,
+    device: torch.device,
+    seed: int,
+    batch_limit: int | None = None,
+) -> tuple[str, int, int]:
     failed = 0
     checked = 0
     passed = True
+    config = shape.config
+    if batch_limit is not None:
+        config = TransformerConfig(
+            min(config.batch_size, batch_limit), config.seq_len, config.d_model,
+            config.num_heads, config.ffn_dim, config.num_layers, config.causal,
+        )
     for trial in range(trials):
-        x, mask = generate_random_case(shape.config, device, torch.float32, seed + trial, shape.padding_ratio, 1.0)
+        x, mask = generate_random_case(config, device, torch.float32, seed + trial, shape.padding_ratio, 1.0)
+        # The appendix contains no padding dimension. An all-true key mask is
+        # mathematically redundant, but passing it with causal=True prevents
+        # PyTorch from selecting its fused memory-efficient attention backend.
+        if shape.padding_ratio == 0.0:
+            mask = None
         with torch.inference_mode():
             comparison = compare_outputs(baseline(x, mask), optimized(x, mask), rtol=0.01, atol=0.001)
         passed &= comparison.passed
@@ -126,26 +145,27 @@ def _accuracy(baseline, optimized, shape: ShapeCase, trials: int, device: torch.
     return ("PASS" if passed else "FAIL", failed, checked)
 
 
-def _memory_skip_reason(shape: ShapeCase, device: torch.device) -> str | None:
-    """Return a reason before allocating a shape that cannot fit this GPU."""
+def _input_oom_reason(shape: ShapeCase, device: torch.device) -> str | None:
+    """Return a reason only when the input itself cannot fit this GPU."""
     free_bytes, _ = torch.cuda.mem_get_info(device)
     activation_bytes = (
         shape.config.batch_size * shape.config.seq_len * shape.config.d_model * 4
     )
-    score_bytes = (
-        shape.config.batch_size * shape.config.num_heads
-        * shape.config.seq_len * shape.config.seq_len * 4
-    )
-    # The causal appendix cases use lab.py's explicit reference path, which
-    # holds a score and probability matrix at peak (both FP32). Include a
-    # conservative activation allowance and require the estimate to stay below
-    # 70% of *currently* free memory, leaving room for the model and allocator.
-    estimated_peak = 2 * score_bytes + 4 * activation_bytes
-    if estimated_peak > 0.70 * free_bytes:
-        estimate_gib = estimated_peak / (1024 ** 3)
+    # Do not reject a shape merely because the explicit baseline's SxS matrix
+    # is too large: the whole point of fused attention is to avoid that matrix.
+    # Skip only when even the input activation cannot coexist with basic model
+    # state. The baseline is attempted separately and may legitimately OOM.
+    if activation_bytes > 0.70 * free_bytes:
+        activation_gib = activation_bytes / (1024 ** 3)
         free_gib = free_bytes / (1024 ** 3)
-        return f"SKIP (estimated explicit-attention workspace {estimate_gib:.2f} GiB exceeds 70% of {free_gib:.2f} GiB free GPU memory)"
+        return f"OOM (input activation {activation_gib:.2f} GiB exceeds 70% of {free_gib:.2f} GiB free GPU memory)"
     return None
+
+
+def _recover_from_oom() -> None:
+    """Release failed temporary allocations so another technique can run."""
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def run_technique_shape_sweep(
@@ -186,17 +206,30 @@ def run_technique_shape_sweep(
                 )
                 results.append(result)
             continue
-        skip_reason = _memory_skip_reason(shape, device)
-        if skip_reason is not None:
-            print(f"[{shape.group}] {shape.label}: {skip_reason}", flush=True)
-            skipped = [
-                TechniqueResult(shape, name, skip_reason, 0, 0, float("nan"), float("nan"), float("nan"))
+        input_oom = _input_oom_reason(shape, device)
+        if input_oom is not None:
+            print(f"[{shape.group}] {shape.label}: {input_oom}", flush=True)
+            unavailable = [
+                TechniqueResult(shape, name, input_oom, 0, 0, float("nan"), float("nan"), float("nan"))
                 for name, _ in TECHNIQUES
             ]
-            results.extend(skipped)
-            measured_by_config[config_key] = skipped
+            results.extend(unavailable)
+            measured_by_config[config_key] = unavailable
             continue
-        x, mask = generate_random_case(shape.config, device, torch.float32, seed + 100000 + shape_index, shape.padding_ratio, 1.0)
+        try:
+            x, mask = generate_random_case(shape.config, device, torch.float32, seed + 100000 + shape_index, shape.padding_ratio, 1.0)
+        except torch.OutOfMemoryError:
+            _recover_from_oom()
+            reason = "OOM (input allocation failed; baseline and optimized paths not run)"
+            unavailable = [
+                TechniqueResult(shape, name, reason, 0, 0, float("nan"), float("nan"), float("nan"))
+                for name, _ in TECHNIQUES
+            ]
+            results.extend(unavailable)
+            measured_by_config[config_key] = unavailable
+            continue
+        if shape.padding_ratio == 0.0:
+            mask = None
         baseline = BaselineTransformer(shape.config).to(device=device).eval()
         # Build one variant at a time so a large 32-combination sweep does not
         # keep dozens of full models resident on the GPU.  The baseline is
@@ -204,7 +237,17 @@ def run_technique_shape_sweep(
         # the beginning of a 32-variant sweep made later rows sensitive to GPU
         # clock/thermal drift (and could create spurious 2x differences between
         # duplicate configurations such as B8/S128 and F2048).
-        warmup_model(baseline, x, mask, warmup, device)
+        baseline_oom = False
+        try:
+            warmup_model(baseline, x, mask, max(warmup, 1), device)
+        except torch.OutOfMemoryError:
+            baseline_oom = True
+            _recover_from_oom()
+            print(
+                f"[{shape.group}] {shape.label}: baseline OOM; "
+                "attempting fused-attention variants",
+                flush=True,
+            )
 
         shape_results: list[TechniqueResult] = []
         for technique_index, (name, options) in enumerate(TECHNIQUES):
@@ -213,24 +256,57 @@ def run_technique_shape_sweep(
             else:
                 variant = ConfigurableOptimizedTransformer(shape.config, options).to(device=device).eval()
             copy_model_weights(baseline, variant)
-            warmup_model(variant, x, mask, warmup, device)
-            accuracy, failed, checked = _accuracy(baseline, variant, shape, accuracy_trials, device, seed + shape_index * 31 + technique_index)
+            try:
+                warmup_model(variant, x, mask, max(warmup, 1), device)
+            except torch.OutOfMemoryError:
+                _recover_from_oom()
+                accuracy = "OOM (optimized full shape)"
+                result = TechniqueResult(
+                    shape, name, accuracy, 0, 0,
+                    float("nan"), float("nan"), float("nan"),
+                )
+                print(
+                    f"[{shape.group}] {shape.label} / {name}: "
+                    "baseline=OOM optimized=OOM",
+                    flush=True,
+                )
+                results.append(result)
+                shape_results.append(result)
+                del variant
+                _recover_from_oom()
+                continue
+            validation_batch = 1 if baseline_oom else None
+            accuracy, failed, checked = _accuracy(
+                baseline, variant, shape, accuracy_trials, device,
+                seed + shape_index * 31 + technique_index,
+                batch_limit=validation_batch,
+            )
+            if baseline_oom:
+                accuracy += " (batch=1 validation; full baseline OOM)"
             # Pair baseline and variant measurements, alternating order on
             # every round.  This cancels slow clock changes and makes the
             # speedup denominator local to the technique being tested.
             baseline_samples = []
             optimized_samples = []
-            for round_index in range(rounds):
-                if round_index % 2 == 0:
-                    baseline_samples += benchmark_once(baseline, x, mask, repeats, device)
+            if baseline_oom:
+                for _ in range(rounds):
                     optimized_samples += benchmark_once(variant, x, mask, repeats, device)
-                else:
-                    optimized_samples += benchmark_once(variant, x, mask, repeats, device)
-                    baseline_samples += benchmark_once(baseline, x, mask, repeats, device)
-            baseline_ms = statistics.median(baseline_samples)
+            else:
+                for round_index in range(rounds):
+                    if round_index % 2 == 0:
+                        baseline_samples += benchmark_once(baseline, x, mask, repeats, device)
+                        optimized_samples += benchmark_once(variant, x, mask, repeats, device)
+                    else:
+                        optimized_samples += benchmark_once(variant, x, mask, repeats, device)
+                        baseline_samples += benchmark_once(baseline, x, mask, repeats, device)
+            baseline_ms = statistics.median(baseline_samples) if baseline_samples else float("nan")
             optimized_ms = statistics.median(optimized_samples)
-            result = TechniqueResult(shape, name, accuracy, failed, checked, baseline_ms, optimized_ms, baseline_ms / optimized_ms)
-            print(f"[{shape.group}] {shape.label} / {name}: {accuracy} failed={failed}/{checked} baseline={baseline_ms:.4f} ms optimized={optimized_ms:.4f} ms speedup={result.speedup:.3f}x", flush=True)
+            speedup = baseline_ms / optimized_ms if baseline_samples else float("nan")
+            result = TechniqueResult(shape, name, accuracy, failed, checked, baseline_ms, optimized_ms, speedup)
+            if baseline_oom:
+                print(f"[{shape.group}] {shape.label} / {name}: {accuracy} failed={failed}/{checked} baseline=OOM optimized={optimized_ms:.4f} ms speedup=N/A", flush=True)
+            else:
+                print(f"[{shape.group}] {shape.label} / {name}: {accuracy} failed={failed}/{checked} baseline={baseline_ms:.4f} ms optimized={optimized_ms:.4f} ms speedup={result.speedup:.3f}x", flush=True)
             results.append(result)
             shape_results.append(result)
             del variant

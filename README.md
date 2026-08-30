@@ -60,6 +60,13 @@ For the appendix technique-combination versus shape experiment (14 shapes ×
 .venv/bin/python tiktok/tests/technique_shape_report.py
 ```
 
+For oversized appendix cases, the unchanged explicit-attention baseline is
+allowed to OOM. Technique rows with the memory-efficient SDPA bit enabled are
+still attempted at full shape; successful rows report optimized latency and
+batch-slice correctness, with speedup marked unavailable because the baseline
+has no latency. To test only the two stress rows, add
+`--shape-numbers 6 14`.
+
 For a faster subset, cap the number of appendix labels. This filter affects
 only the report runner; `lab.py` is unchanged:
 

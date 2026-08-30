@@ -287,7 +287,14 @@ class UserOptimizedTransformer(BaselineTransformer):
         # fused reduction; retain the same math while specializing that case
         # to native residual + LayerNorm.  The threshold is expressed in
         # activation elements so it scales with batch/sequence/hidden size.
-        use_fused_ln = x.numel() >= 131072
+        rows = x.numel() // x.shape[-1]
+        # One Triton program owns one token row.  The appendix B=10000 stress
+        # case launches 1,280,000 programs per LayerNorm and caused a driver
+        # launch failure under repeated timing on the RTX 4060.  Native
+        # LayerNorm has a scalable launch for that regime, while the custom
+        # fused kernel remains enabled through the largest verified appendix
+        # grid (64 * 1024 = 65,536 rows).
+        use_fused_ln = x.numel() >= 131072 and rows <= 65536
         normalized = self.layers[0].norm1(x)
         for layer_index, layer in enumerate(self.layers):
             attention_output = self._attention(
