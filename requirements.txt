@@ -1,2 +1,4 @@
 playwright
 matplotlib>=3.8
+torch==2.12.1
+triton==3.7.1
